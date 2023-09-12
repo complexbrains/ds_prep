@@ -11,6 +11,7 @@ import datalad.api
 from datalad.support.annexrepo import AnnexRepo
 from deepbrain import Extractor
 import scipy.ndimage.morphology
+from PIL import Image
 
 from dipy.align.imaffine import (
     transform_centers_of_mass,
@@ -73,6 +74,11 @@ def parse_args():
         help="Output debug images in the current directory",
     )
     parser.add_argument(
+        "--output-pngs-path",
+        type=Path,
+        help="Output reports images to the specified directory",
+    )
+    parser.add_argument(
         "--ref-bids-filters",
         dest="ref_bids_filters",
         action="store",
@@ -110,10 +116,10 @@ def registration(ref, moving, ref_mask=None, moving_mask=None):
     ref_mask_data, mov_mask_data = None, None
     ref_data = ref.get_fdata()
     if ref_mask:
-        ref_mask_data = (ref_mask.get_fdata() > 0.5).astype(np.int)
+        ref_mask_data = (ref_mask.get_fdata() > 0.5).astype(np.int32)
     mov_data = moving.get_fdata()
     if moving_mask:
-        mov_mask_data = (moving_mask.get_fdata() > 0.5).astype(np.int)
+        mov_mask_data = (moving_mask.get_fdata() > 0.5).astype(np.int32)
 
     metric = MutualInformationMetric(nbins=32, sampling_proportion=None)
     transform = RigidTransform3D()
@@ -214,12 +220,12 @@ def main():
     subject_list = (
         args.participant_label if args.participant_label else bids.layout.Query.ANY
     )
-    session_list = args.session_label if args.session_label else bids.layout.Query.ANY
     filters = dict(
         subject=subject_list,
-        session=session_list,
         **args.ref_bids_filters,
         extension=['nii','nii.gz'])
+    if args.session_label:
+        filters['session'] = args.session_label
     deface_ref_images = layout.get(**filters)
 
     if not len(deface_ref_images):
@@ -274,7 +280,8 @@ def main():
             output_debug_images(tmpl_image, ref_image, ref2tpl_affine)
 
         series_to_deface = []
-        for filters in args.other_bids_filters:
+        filters_to_deface = args.other_bids_filters if isinstance(args.other_bids_filters, list) else [args.other_bids_filters]
+        for filters in filters_to_deface:
             series_to_deface.extend(
                 layout.get(
                     extension=["nii", "nii.gz"],
@@ -319,11 +326,22 @@ def main():
                     warped_mask.to_filename(warped_mask_path)
                     new_files.append(warped_mask_path)
 
+            masked_volume = np.asanyarray(serie_nb.dataobj) * np.asanyarray(warped_mask.dataobj)
+
             masked_serie = nb.Nifti1Image(
-                np.asanyarray(serie_nb.dataobj) * np.asanyarray(warped_mask.dataobj),
+                masked_volume,
                 serie_nb.affine,
                 serie_nb.header,
             )
+
+            if args.output_pngs_path:
+                args.output_pngs_path.mkdir(parents=True, exist_ok=True)
+                slice = masked_volume[masked_volume.shape[0]//2,:,:]
+                im = Image.fromarray((slice * (255/slice.max())).astype(np.uint8)).rotate(90)
+                png_output_path = args.output_pngs_path / (Path(serie.path).stem + '.png')
+                logging.info(f"saving report slice {png_output_path}")
+                im.save(png_output_path)
+
             masked_serie.to_filename(serie.path)
             modified_files.append(serie.path)
 
@@ -359,7 +377,7 @@ def generate_deface_ear_mask(mni):
         np.linspace(
             jaw_marker[0], above_eye_marker[0], above_eye_marker[1] - jaw_marker[1]
         )
-    ).astype(np.int)
+    ).astype(np.int32)
     for z, y in zip(range(jaw_marker[1], above_eye_marker[1]), y_coords):
         deface_ear_mask[:, y:, z] = 0
 
@@ -368,7 +386,7 @@ def generate_deface_ear_mask(mni):
     deface_ear_mask[-ear_marker[0] :, :, : ear_marker[1]] = 0
     x_coords = np.round(
         np.linspace(ear_marker[0], ear_marker2[0], ear_marker2[1] - ear_marker[1])
-    ).astype(np.int)
+    ).astype(np.int32)
     for z, x in zip(range(ear_marker[1], ear_marker2[1]), x_coords):
         deface_ear_mask[:x, :, z] = 0
         deface_ear_mask[-x:, :, z] = 0
